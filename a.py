@@ -6,14 +6,37 @@ from nmigen import *
 # Bad hack :(
 del Module.__init_subclass__
 
+class Key:
+    value: object 
+
+    def __eq__(self, other: Key) -> bool:
+        if not isinstance(other, Key):
+            return False
+        else:
+            return other.value == self.value
+        
+
+class GlobalKey(Key):
+    __counter = 0
+    def __init__(self):
+        self.value = GlobalKey.__counter
+        GlobalKey.__counter += 1
+
 class ModuleWrapper(Module):
     def __init__(self):
         super().__init__()
         self.submodules = []
 
+class ElementMeta(type):
+    def __call__(cls, *args, key = None, **kwargs):
+        obj = cls.__new__(cls)
+        obj.__init__(*args, **kwargs)
+        obj.key = key
+        return obj
 
-class Element:
+class Element(metaclass = ElementMeta):
     m: ModuleWrapper
+    key: Key
     
     def create(self, context):
         ...
@@ -51,7 +74,7 @@ class Test(Element):
         b = Signal()
 
         Ila.add_probe(a)
-        Ila.add_probe(b)
+        context.find_by_key(ila_key).add_probe(b)
 
         self.m.d.sync += a.eq(b)
 
@@ -67,10 +90,15 @@ class ElaborationContext:
 
     def find(self, cls):
         val = self
-        while (parent := self.parent) != None:
+        while (val := val.parent) != None:
             if isinstance(val.element, cls):
                 return val.element
-            val = parent
+
+    def find_by_key(self, key: Key):
+        val = self
+        while (val := val.parent) != None:
+            if val.element.key == key:
+                return val.element
 
 
 class GlobalElaborationContext:
@@ -93,4 +121,16 @@ def element_to_module(element: Element, parent: ElaborationContext = None) -> Mo
         
 from nmigen.back.verilog import convert
 
-print(convert(element_to_module(Ila(child = Test()))))
+ila_key = GlobalKey()
+print(
+    convert(
+        element_to_module(
+            Ila(
+                key = ila_key,
+                child = Ila(
+                    child = Test()
+                )
+            )
+        )
+    )
+)
