@@ -21,6 +21,9 @@ class Element:
     def finalize(self, context):
         ...
 
+    def elaborate(self, platform):
+        raise RuntimeError("elaborate called on Element. This either means you did not convert the Element to a Module before passing it to nmigen or you used a Element as a submodule of a nmigen Module, this is currently not supported")
+
 
 class Ila(Element):
     def __init__(self, *, child):
@@ -35,8 +38,11 @@ class Ila(Element):
             probe_storage = Signal(10)
             self.m.d.sync += probe_storage.eq(Cat(probe, probe_storage))
 
-    def add_probe(self, signal):
-        self.probes.append(signal)
+    def add_probe(self: Ila | Value, signal: Value = None):
+        if (signal is None and not isinstance(self, Ila)):
+            GlobalElaborationContext.current_context.find(Ila).add_probe(self)
+        else:    
+            self.probes.append(signal)
 
 
 class Test(Element):
@@ -44,8 +50,8 @@ class Test(Element):
         a = Signal()
         b = Signal()
 
-        context.find(Ila).add_probe(a)
-        context.find(Ila).add_probe(b)
+        Ila.add_probe(a)
+        Ila.add_probe(b)
 
         self.m.d.sync += a.eq(b)
 
@@ -67,8 +73,13 @@ class ElaborationContext:
             val = parent
 
 
+class GlobalElaborationContext:
+    current_context: ElaborationContext
+
+
 def element_to_module(element: Element, parent: ElaborationContext = None) -> Module:
     context = ElaborationContext(element, parent = parent)
+    GlobalElaborationContext.current_context = context
 
     module = ModuleWrapper()
     element.m = module
