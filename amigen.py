@@ -3,6 +3,9 @@
 from __future__ import annotations
 from contextlib import contextmanager
 from nmigen import Module, Signal, Value, Cat, ClockDomain, Fragment, DomainRenamer
+from nmigen.build import Platform
+import warnings
+import nmigen
 from typing import Any, Iterable
 from collections import defaultdict
 import functools
@@ -100,8 +103,9 @@ class SubmoduleBuilder:
         return iter(self._storage.items())
 
 class DomainSetBuilder:
-    def __init__(self, element: Element):
+    def __init__(self, element: Element, top_for_nmigen: bool):
         object.__setattr__(self, "_element", element)
+        object.__setattr__(self, "_top_for_nmigen", top_for_nmigen)
 
     def __iadd__(self, domain):
         if not isinstance(domain, ClockDomain):
@@ -117,9 +121,14 @@ class DomainSetBuilder:
         assert domain.local == False, "in amigen the local parameter is ignored and the clock domain is always local"
         module_local_domain = ClockDomain(name = domain_name, clk_edge=domain.clk_edge, reset_less=domain.rst is None, async_reset=domain.async_reset, local=True)
         self._element.m._add_domain(module_local_domain)
-        self._element.m.d.comb += module_local_domain.clk.eq(domain.clk)
-        if not domain.rst is None:
-            self._element.m.d.comb += module_local_domain.rst.eq(domain.rst)
+
+        if self._top_for_nmigen:
+            domain.local = True
+
+            self._element.m.d.comb += module_local_domain.clk.eq(nmigen.ClockSignal(domain.name))
+            if not domain.rst is None:
+                self._element.m.d.comb += module_local_domain.rst.eq(nmigen.ResetSignal(domain.name))
+
         self._element.context.domains[domain.name] = module_local_domain
 
         return self
@@ -132,10 +141,10 @@ class DomainSetBuilder:
         self += domain
 
 class ModuleWrapper(Module):
-    def __init__(self, element):
+    def __init__(self, element, top):
         super().__init__()
         self.submodules = SubmoduleBuilder()
-        self.domains = DomainSetBuilder(element)
+        self.domains = DomainSetBuilder(element, top)
 
 class ElementMeta(type):
     def __call__(cls, *args, key = None, name = None, **kwargs):
@@ -205,7 +214,8 @@ class Element(metaclass = ElementMeta):
         ...
 
     def elaborate(self, platform):
-        raise RuntimeError("elaborate called on Element. This either means you did not convert the Element to a Module before passing it to nmigen or you used a Element as a submodule of a nmigen Module, this is currently not supported")
+        warnings.warn("elaborate called on Element. While this is supported, this might lead to unexpected behaviour.")
+        return element_to_module(self, top_name=f"{self.__class__.__name__}", for_nmigen=True, platform = platform)
 
 class DomainMapper:
     def __init__(self, map):
@@ -228,15 +238,17 @@ class ElaborationContext:
     element: Element
     # maps name to a ClockDomain object
     domains: dict[str, ClockDomain]
+    platform: Platform
 
-    def __init__(self, element: Element, domains: dict[str, ClockDomain], parent: ElaborationContext = None, visible = True):
+    def __init__(self, element: Element, platform: Platform, domains: dict[str, ClockDomain], parent: ElaborationContext = None, visible = True):
         self.visible = visible
         self.parent = parent
         self.element = element
         self.domains = domains
+        self.platform = platform
 
     def _copy_invisible(self) -> ElaborationContext:
-        return ElaborationContext(self.element, self.domains, self.parent, False)
+        return ElaborationContext(self.element, self.platform, self.domains, self.parent, False)
 
     def find(self, cls):
         val = self
@@ -272,8 +284,8 @@ class GlobalElaborationContext:
             
     @staticmethod
     @contextmanager
-    def context_for(*, element: Element, parent: ElaborationContext, domains: dict[str, ClockDomain]):
-        context = ElaborationContext(element, domains.copy(), parent)
+    def context_for(*, element: Element, parent: ElaborationContext, domains: dict[str, ClockDomain], platform: Platform):
+        context = ElaborationContext(element, platform, domains.copy(), parent)
         element.context = context
         old_context = GlobalElaborationContext.current_context
         GlobalElaborationContext.current_context = context
@@ -283,10 +295,10 @@ class GlobalElaborationContext:
         finally:
             GlobalElaborationContext.current_context = old_context
 
-def element_to_module(element: Element, top_name = "top") -> Module:
+def element_to_module(element: Element, platform = None, top_name = "top", for_nmigen = False) -> Module:
     def element_to_module_inner(element: Element, top = False, domains = {}, parent: ElaborationContext = None) -> Module:
-        with GlobalElaborationContext.context_for(element = element, parent = parent, domains = domains) as context:
-            module = ModuleWrapper(element)
+        with GlobalElaborationContext.context_for(element = element, parent = parent, domains = domains, platform = platform) as context:
+            module = ModuleWrapper(element, top and for_nmigen)
             element.m = module
 
             done_submodules = set()
